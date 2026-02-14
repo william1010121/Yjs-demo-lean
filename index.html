@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Lean 4 Collaborative Editor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: system-ui, -apple-system, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+
+        #toolbar {
+            display: flex; align-items: center; gap: 12px;
+            padding: 8px 16px; background: #1e1e2e; color: #cdd6f4;
+            border-bottom: 1px solid #313244; font-size: 14px;
+        }
+        #toolbar .title { font-weight: 600; }
+        #status, #lsp-status { padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+        .status-connected { background: #a6e3a1; color: #1e1e2e; }
+        .status-connecting { background: #f9e2af; color: #1e1e2e; }
+        .status-error { background: #f38ba8; color: #1e1e2e; }
+
+        #main { display: flex; flex: 1; overflow: hidden; }
+
+        #editor-pane {
+            flex: 1; display: flex; flex-direction: column;
+            border-right: 2px solid #313244; min-width: 0;
+        }
+        #editor-pane .cm-editor { flex: 1; overflow: auto; }
+        #editor-pane .cm-editor .cm-scroller { overflow: auto; }
+
+        #infoview-pane {
+            width: 40%; min-width: 300px; display: flex; flex-direction: column;
+            background: #1e1e2e; color: #cdd6f4; overflow: auto;
+        }
+        #infoview-pane .pane-header {
+            padding: 8px 16px; font-weight: 600; font-size: 13px;
+            background: #181825; border-bottom: 1px solid #313244;
+        }
+        #infoview-container {
+            flex: 1; padding: 12px 16px; overflow: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 13px;
+            white-space: pre-wrap; line-height: 1.5;
+        }
+        #infoview-container .goal { margin-bottom: 16px; }
+        #infoview-container .goal-header { color: #89b4fa; font-weight: 600; margin-bottom: 4px; }
+        #infoview-container .goal-hyp { color: #a6adc8; }
+        #infoview-container .goal-target { color: #a6e3a1; margin-top: 4px; }
+        #infoview-container .diagnostic { margin-bottom: 8px; padding: 4px 8px; border-radius: 4px; }
+        #infoview-container .diagnostic.error { background: #f38ba822; border-left: 3px solid #f38ba8; color: #f38ba8; }
+        #infoview-container .diagnostic.warning { background: #f9e2af22; border-left: 3px solid #f9e2af; color: #f9e2af; }
+        #infoview-container .diagnostic.info { background: #89b4fa22; border-left: 3px solid #89b4fa; color: #89b4fa; }
+
+        /* CodeMirror dark theme overrides */
+        .cm-editor { background: #1e1e2e; }
+        .cm-editor .cm-content { color: #cdd6f4; }
+        .cm-editor .cm-gutters { background: #181825; color: #6c7086; border-right: 1px solid #313244; }
+        .cm-editor .cm-activeLine { background: #313244 !important; }
+        .cm-editor .cm-activeLineGutter { background: #313244 !important; }
+        .cm-editor .cm-selectionBackground { background: #45475a !important; }
+        .cm-editor .cm-cursor { border-left-color: #f5e0dc; }
+        .cm-editor .cm-matchingBracket { background: #45475a; color: #f5e0dc !important; }
+
+        /* LSP diagnostics */
+        .cm-lintRange-error { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='m0 3 l2-2 l2 2 l2-2' stroke='%23f38ba8' fill='none' stroke-width='.7'/%3E%3C/svg%3E") bottom left repeat-x; padding-bottom: 2px; }
+        .cm-lintRange-warning { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='m0 3 l2-2 l2 2 l2-2' stroke='%23f9e2af' fill='none' stroke-width='.7'/%3E%3C/svg%3E") bottom left repeat-x; padding-bottom: 2px; }
+        .cm-lintRange-info { background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='m0 3 l2-2 l2 2 l2-2' stroke='%2389b4fa' fill='none' stroke-width='.7'/%3E%3C/svg%3E") bottom left repeat-x; padding-bottom: 2px; }
+
+        .file-progress {
+            height: 2px; background: #313244; position: relative;
+        }
+        .file-progress .bar {
+            height: 100%; background: #89b4fa; transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <span class="title">Lean 4</span>
+        <span id="status" class="status-connecting">Yjs: connecting...</span>
+        <span id="lsp-status" class="status-connecting">LSP: connecting...</span>
+    </div>
+    <div class="file-progress"><div class="bar" id="progress-bar" style="width:0%"></div></div>
+    <div id="main">
+        <div id="editor-pane">
+            <div id="editor"></div>
+        </div>
+        <div id="infoview-pane">
+            <div class="pane-header">Lean Infoview</div>
+            <div id="infoview-container"><span style="color:#6c7086">Move cursor to see goal state...</span></div>
+        </div>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "@codemirror/state": "https://esm.sh/*@codemirror/state@6.5.4",
+            "@codemirror/view": "https://esm.sh/*@codemirror/view@6.35.3?external=@codemirror/state",
+            "@codemirror/lint": "https://esm.sh/*@codemirror/lint@6.9.4?external=@codemirror/state,@codemirror/view",
+            "@codemirror/language": "https://esm.sh/*@codemirror/language@6.12.1?external=@codemirror/state,@codemirror/view",
+            "@codemirror/autocomplete": "https://esm.sh/*@codemirror/autocomplete@6.20.0?external=@codemirror/state,@codemirror/view,@codemirror/language,@codemirror/commands",
+            "@codemirror/commands": "https://esm.sh/*@codemirror/commands@6.8.1?external=@codemirror/state,@codemirror/view,@codemirror/language",
+            "@codemirror/search": "https://esm.sh/*@codemirror/search@6.5.11?external=@codemirror/state,@codemirror/view",
+            "codemirror": "https://esm.sh/*codemirror@6.0.2?external=@codemirror/state,@codemirror/view,@codemirror/lint,@codemirror/language,@codemirror/autocomplete,@codemirror/commands,@codemirror/search",
+            "@lezer/common": "https://esm.sh/*@lezer/common",
+            "@lezer/highlight": "https://esm.sh/*@lezer/highlight?external=@lezer/common",
+            "@lezer/lr": "https://esm.sh/*@lezer/lr?external=@lezer/common",
+            "@marijn/find-cluster-break": "https://esm.sh/*@marijn/find-cluster-break",
+            "style-mod": "https://esm.sh/style-mod",
+            "w3c-keyname": "https://esm.sh/w3c-keyname",
+            "crelt": "https://esm.sh/crelt",
+            "yjs": "https://esm.sh/*yjs@13",
+            "y-codemirror.next": "https://esm.sh/*y-codemirror.next@0.3.5?external=@codemirror/state,@codemirror/view,yjs",
+            "y-websocket": "https://esm.sh/*y-websocket@2?external=yjs",
+            "y-protocols/sync": "https://esm.sh/*y-protocols/sync?external=yjs",
+            "y-protocols/awareness": "https://esm.sh/*y-protocols/awareness?external=yjs",
+            "y-protocols/auth": "https://esm.sh/*y-protocols/auth?external=yjs",
+            "lib0/": "https://esm.sh/*lib0/"
+        }
+    }
+    </script>
+    <script type="module">
+        // =====================================================================
+        // Imports (using importmap with esm.sh bundle mode)
+        // =====================================================================
+        import { EditorView, basicSetup } from 'codemirror'
+        import { EditorState, Compartment, Prec } from '@codemirror/state'
+        import { ViewPlugin, keymap } from '@codemirror/view'
+        import { setDiagnostics, lintGutter } from '@codemirror/lint'
+        import { StreamLanguage } from '@codemirror/language'
+        import { autocompletion } from '@codemirror/autocomplete'
+
+        import * as Y from 'yjs'
+        import { WebsocketProvider } from 'y-websocket'
+        import { yCollab } from 'y-codemirror.next'
+
+        // =====================================================================
+        // Configuration
+        // =====================================================================
+        const ROOM = 'lean-room-1'
+        let LEAN_FILE_URI = null
+        const SESSION_ID = 'session-' + Math.random().toString(36).slice(2, 10)
+        const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+        const wsBase = `${wsProtocol}//${location.host}`
+
+        // =====================================================================
+        // Yjs setup
+        // =====================================================================
+        const ydoc = new Y.Doc()
+        const provider = new WebsocketProvider(`${wsBase}/yjs`, ROOM, ydoc)
+        const ytext = ydoc.getText('codemirror')
+
+        const userName = 'User ' + Math.floor(Math.random() * 100)
+        const userColor = '#' + Math.floor(Math.random() * 0xFFFFFF).toString(16).padStart(6, '0')
+        provider.awareness.setLocalStateField('user', {
+            name: userName,
+            color: userColor,
+            colorLight: userColor + '40'
+        })
+
+        // Yjs status
+        const statusEl = document.getElementById('status')
+        provider.on('status', e => {
+            if (e.status === 'connected') {
+                statusEl.textContent = 'Yjs: connected'
+                statusEl.className = 'status-connected'
+            } else {
+                statusEl.textContent = 'Yjs: connecting...'
+                statusEl.className = 'status-connecting'
+            }
+        })
+
+        // =====================================================================
+        // LSP Client (JSON-RPC 2.0 over WebSocket)
+        // =====================================================================
+        class LeanLspClient {
+            constructor(url) {
+                this.url = url
+                this.ws = null
+                this.requestId = 1
+                this.pending = new Map()  // id -> {resolve, reject}
+                this.notificationHandlers = new Map()  // method -> [callbacks]
+                this.ready = false
+                this.connectPromise = null
+            }
+
+            connect() {
+                if (this.connectPromise) return this.connectPromise
+                this.connectPromise = new Promise((resolve, reject) => {
+                    this.ws = new WebSocket(this.url)
+                    this.ws.onopen = () => {
+                        this.ready = true
+                        resolve()
+                    }
+                    this.ws.onclose = () => {
+                        this.ready = false
+                        this.connectPromise = null
+                        lspInitialized = false
+                        lspInitPromise = null
+                        currentGoalText = ''
+                        currentHoverText = ''
+                        updateInfoview()
+                        updateLspStatus('disconnected')
+                        // Reject all pending
+                        for (const [, p] of this.pending) p.reject(new Error('WebSocket closed'))
+                        this.pending.clear()
+                    }
+                    this.ws.onerror = (e) => {
+                        reject(e)
+                    }
+                    this.ws.onmessage = (event) => {
+                        const msg = JSON.parse(event.data)
+                        if (msg.id !== undefined && this.pending.has(msg.id)) {
+                            const { resolve, reject } = this.pending.get(msg.id)
+                            this.pending.delete(msg.id)
+                            if (msg.error) reject(msg.error)
+                            else resolve(msg.result)
+                        } else if (msg.method) {
+                            // Notification or server request
+                            const handlers = this.notificationHandlers.get(msg.method) || []
+                            for (const h of handlers) h(msg.params)
+                        }
+                    }
+                })
+                return this.connectPromise
+            }
+
+            request(method, params) {
+                return new Promise((resolve, reject) => {
+                    const id = this.requestId++
+                    this.pending.set(id, { resolve, reject })
+                    this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+                })
+            }
+
+            notify(method, params) {
+                this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+            }
+
+            onNotification(method, callback) {
+                if (!this.notificationHandlers.has(method)) {
+                    this.notificationHandlers.set(method, [])
+                }
+                this.notificationHandlers.get(method).push(callback)
+            }
+        }
+
+        // =====================================================================
+        // LSP Client instance + initialization
+        // =====================================================================
+        const lsp = new LeanLspClient(`${wsBase}/lsp/${SESSION_ID}`)
+
+        const lspStatusEl = document.getElementById('lsp-status')
+        function updateLspStatus(state) {
+            if (state === 'ready') {
+                lspStatusEl.textContent = 'LSP: ready'
+                lspStatusEl.className = 'status-connected'
+            } else if (state === 'initializing') {
+                lspStatusEl.textContent = 'LSP: initializing...'
+                lspStatusEl.className = 'status-connecting'
+            } else {
+                lspStatusEl.textContent = 'LSP: disconnected'
+                lspStatusEl.className = 'status-error'
+            }
+        }
+
+        let docVersion = 0
+        let lspInitialized = false
+        let lspInitPromise = null
+
+        async function initLsp() {
+            updateLspStatus('initializing')
+
+            // Fetch the real absolute file URI from the server
+            const uriResp = await fetch('/file-uri')
+            const uriData = await uriResp.json()
+            LEAN_FILE_URI = uriData.fileUri
+            const rootUri = uriData.rootUri
+
+            await lsp.connect()
+
+            // Initialize
+            await lsp.request('initialize', {
+                processId: null,
+                rootUri: rootUri,
+                capabilities: {
+                    textDocument: {
+                        publishDiagnostics: { relatedInformation: true },
+                        hover: { contentFormat: ['markdown', 'plaintext'] },
+                        completion: { completionItem: { snippetSupport: false } },
+                    }
+                },
+                initializationOptions: {}
+            })
+            lsp.notify('initialized', {})
+
+            // Open document
+            docVersion = 1
+            lsp.notify('textDocument/didOpen', {
+                textDocument: {
+                    uri: LEAN_FILE_URI,
+                    languageId: 'lean4',
+                    version: docVersion,
+                    text: ytext.toString()
+                }
+            })
+
+            lspInitialized = true
+            updateLspStatus('ready')
+        }
+
+        function startLspInit() {
+            if (lspInitialized) return Promise.resolve()
+            if (lspInitPromise) return lspInitPromise
+            lspInitPromise = initLsp()
+                .catch(err => {
+                    console.error('LSP init failed:', err)
+                    updateLspStatus('error')
+                })
+                .finally(() => {
+                    if (!lspInitialized) lspInitPromise = null
+                })
+            return lspInitPromise
+        }
+
+        // =====================================================================
+        // Diagnostics handling
+        // =====================================================================
+        let currentDiagnostics = []
+
+        lsp.onNotification('textDocument/publishDiagnostics', (params) => {
+            if (params.uri !== LEAN_FILE_URI) return
+            currentDiagnostics = params.diagnostics || []
+            applyDiagnostics()
+            updateInfoview()
+        })
+
+        // File progress
+        lsp.onNotification('$/lean/fileProgress', (params) => {
+            const bar = document.getElementById('progress-bar')
+            if (params.processing && params.processing.length > 0) {
+                bar.style.width = '50%'
+                bar.style.background = '#f9e2af'
+            } else {
+                bar.style.width = '100%'
+                bar.style.background = '#a6e3a1'
+                setTimeout(() => { bar.style.width = '0%' }, 1000)
+            }
+        })
+
+        function severityToClass(severity) {
+            switch (severity) {
+                case 1: return 'error'
+                case 2: return 'warning'
+                case 3: return 'info'
+                case 4: return 'info'
+                default: return 'info'
+            }
+        }
+
+        function applyDiagnostics() {
+            if (!editorView) return
+            const doc = editorView.state.doc
+            const cmDiags = currentDiagnostics.map(d => {
+                const from = posToOffset(doc, d.range.start)
+                const to = posToOffset(doc, d.range.end)
+                return {
+                    from: Math.max(0, Math.min(from, doc.length)),
+                    to: Math.max(0, Math.min(Math.max(to, from + 1), doc.length)),
+                    severity: severityToClass(d.severity),
+                    message: d.message
+                }
+            }).filter(d => d.from < doc.length)
+
+            editorView.dispatch(setDiagnostics(editorView.state, cmDiags))
+        }
+
+        function posToOffset(doc, pos) {
+            const line = Math.min(pos.line + 1, doc.lines)
+            const lineObj = doc.line(line)
+            return lineObj.from + Math.min(pos.character, lineObj.length)
+        }
+
+        function offsetToPos(doc, offset) {
+            const line = doc.lineAt(offset)
+            return { line: line.number - 1, character: offset - line.from }
+        }
+
+        // =====================================================================
+        // Infoview (custom lightweight implementation)
+        // =====================================================================
+        const infoviewEl = document.getElementById('infoview-container')
+        let lastCursorPos = null
+        let currentGoalText = ''
+        let currentHoverText = ''
+        let goalReqSeq = 0
+        let hoverReqSeq = 0
+
+        function updateInfoview() {
+            if (!lastCursorPos) return
+            const pos = lastCursorPos
+
+            // Show diagnostics at or near cursor line
+            const lineDiags = currentDiagnostics.filter(d =>
+                d.range.start.line <= pos.line && d.range.end.line >= pos.line
+            )
+
+            let html = ''
+
+            if (currentGoalText) {
+                html += `<div class="goal"><div class="goal-header">Goals</div><div class="goal-target">${escapeHtml(currentGoalText)}</div></div>`
+            }
+
+            if (lineDiags.length > 0) {
+                html += '<div class="section-title" style="color:#89b4fa;margin-bottom:8px;font-weight:600">Messages</div>'
+                for (const d of lineDiags) {
+                    const cls = severityToClass(d.severity)
+                    html += `<div class="diagnostic ${cls}">${escapeHtml(d.message)}</div>`
+                }
+            }
+
+            if (currentHoverText) {
+                html += `<div style="margin-top:12px"><div class="section-title" style="color:#89b4fa;margin-bottom:8px;font-weight:600">Hover</div><div style="color:#cdd6f4">${escapeHtml(currentHoverText)}</div></div>`
+            }
+
+            if (!html) {
+                html = '<span style="color:#6c7086">No info at cursor position.</span>'
+            }
+
+            infoviewEl.innerHTML = html
+        }
+
+        // Request plain goals (Lean-specific) for infoview
+        async function requestGoalInfo(pos) {
+            if (!lsp.ready || !lspInitialized || !LEAN_FILE_URI) return
+            const seq = ++goalReqSeq
+            try {
+                const result = await lsp.request('$/lean/plainGoal', {
+                    textDocument: { uri: LEAN_FILE_URI },
+                    position: { line: pos.line, character: pos.character }
+                })
+                if (seq !== goalReqSeq) return
+                if (result && typeof result.rendered === 'string' && result.rendered.trim()) {
+                    currentGoalText = result.rendered.trim()
+                } else {
+                    // Fallback to term-goal when not inside a tactic state
+                    const termGoal = await lsp.request('$/lean/plainTermGoal', {
+                        textDocument: { uri: LEAN_FILE_URI },
+                        position: { line: pos.line, character: pos.character }
+                    })
+                    if (seq !== goalReqSeq) return
+                    currentGoalText = termGoal && termGoal.goal ? termGoal.goal.trim() : ''
+                }
+            } catch (e) {
+                if (seq !== goalReqSeq) return
+                currentGoalText = ''
+            }
+            updateInfoview()
+        }
+
+        // Also request hover info from LSP for richer infoview
+        let hoverTimeout = null
+        async function requestHoverInfo(pos) {
+            if (!lsp.ready || !lspInitialized || !LEAN_FILE_URI) return
+            const seq = ++hoverReqSeq
+            try {
+                const result = await lsp.request('textDocument/hover', {
+                    textDocument: { uri: LEAN_FILE_URI },
+                    position: { line: pos.line, character: pos.character }
+                })
+                if (seq !== hoverReqSeq) return
+                if (result && result.contents) {
+                    let text = ''
+                    if (typeof result.contents === 'string') {
+                        text = result.contents
+                    } else if (result.contents.value) {
+                        text = result.contents.value
+                    } else if (Array.isArray(result.contents)) {
+                        text = result.contents.map(c => typeof c === 'string' ? c : c.value).join('\n')
+                    }
+                    currentHoverText = text || ''
+                } else {
+                    currentHoverText = ''
+                }
+            } catch (e) {
+                if (seq !== hoverReqSeq) return
+                currentHoverText = ''
+            }
+            updateInfoview()
+        }
+
+        function escapeHtml(s) {
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        }
+
+        // =====================================================================
+        // LSP Autocomplete source
+        // =====================================================================
+        // Map LSP CompletionItemKind to CodeMirror type
+        const lspKindToType = {
+            1: 'text', 2: 'method', 3: 'function', 4: 'constructor',
+            5: 'field', 6: 'variable', 7: 'class', 8: 'interface',
+            9: 'module', 10: 'property', 11: 'unit', 12: 'value',
+            13: 'enum', 14: 'keyword', 15: 'snippet', 16: 'color',
+            17: 'file', 18: 'reference', 19: 'folder', 20: 'constant',
+            21: 'enum', 22: 'struct', 23: 'event', 24: 'operator',
+            25: 'type',
+        }
+
+        async function lspCompletionSource(context) {
+            if (!lsp.ready || !lspInitialized || !LEAN_FILE_URI) return null
+            await flushPendingDidChange()
+            const pos = offsetToPos(context.state.doc, context.pos)
+            try {
+                const result = await lsp.request('textDocument/completion', {
+                    textDocument: { uri: LEAN_FILE_URI },
+                    position: { line: pos.line, character: pos.character },
+                })
+                if (!result) return null
+                const items = Array.isArray(result) ? result : (result.items || [])
+                if (items.length === 0) return null
+
+                // Find the start of the word being typed
+                const word = context.matchBefore(/[\w.']+/)
+                if (!context.explicit && !word) return null
+                const from = word ? word.from : context.pos
+
+                return {
+                    from,
+                    options: items.map(item => ({
+                        label: item.label,
+                        type: lspKindToType[item.kind] || 'text',
+                        detail: item.detail || '',
+                        apply: item.textEdit ? item.textEdit.newText : (item.insertText || item.label),
+                    })),
+                }
+            } catch (e) {
+                const now = Date.now()
+                if (!lspCompletionSource._lastErrorAt || now - lspCompletionSource._lastErrorAt > 2000) {
+                    console.warn('LSP completion failed:', e)
+                    lspCompletionSource._lastErrorAt = now
+                }
+                return null
+            }
+        }
+
+        // =====================================================================
+        // CodeMirror Editor
+        // =====================================================================
+        let editorView = null
+        const twoSpaceTabKeymap = Prec.high(keymap.of([{
+            key: 'Tab',
+            run: (view) => {
+                view.dispatch(view.state.replaceSelection('  '))
+                return true
+            }
+        }]))
+
+        // Debounced didChange
+        let changeTimeout = null
+        let pendingDidChangeText = null
+        let goalTimeout = null
+        function sendDidChangeNow(text) {
+            if (!lsp.ready || !lspInitialized) return
+            docVersion++
+            lsp.notify('textDocument/didChange', {
+                textDocument: { uri: LEAN_FILE_URI, version: docVersion },
+                contentChanges: [{ text }]
+            })
+        }
+
+        function flushPendingDidChange() {
+            if (changeTimeout) {
+                clearTimeout(changeTimeout)
+                changeTimeout = null
+            }
+            if (pendingDidChangeText === null) return Promise.resolve()
+            const text = pendingDidChangeText
+            pendingDidChangeText = null
+            sendDidChangeNow(text)
+            return Promise.resolve()
+        }
+
+        // ViewPlugin to track changes and cursor
+        const lspSyncPlugin = ViewPlugin.fromClass(class {
+            update(update) {
+                if (update.docChanged) {
+                    pendingDidChangeText = update.state.doc.toString()
+                    clearTimeout(changeTimeout)
+                    changeTimeout = setTimeout(() => {
+                        changeTimeout = null
+                        if (pendingDidChangeText === null) return
+                        const text = pendingDidChangeText
+                        pendingDidChangeText = null
+                        sendDidChangeNow(text)
+                    }, 300)
+                }
+                if (update.selectionSet || update.docChanged) {
+                    const pos = update.state.selection.main.head
+                    const doc = update.state.doc
+                    lastCursorPos = offsetToPos(doc, pos)
+                    updateInfoview()
+                    if (!lspInitialized) return
+                    // Request goal state with debounce
+                    clearTimeout(goalTimeout)
+                    goalTimeout = setTimeout(() => requestGoalInfo(lastCursorPos), 200)
+                    // Request hover with debounce
+                    clearTimeout(hoverTimeout)
+                    hoverTimeout = setTimeout(() => requestHoverInfo(lastCursorPos), 500)
+                }
+            }
+        })
+
+        // Simple Lean 4 syntax highlighting via StreamLanguage
+        const lean4Language = StreamLanguage.define({
+            token(stream) {
+                // Line comments
+                if (stream.match('--')) { stream.skipToEnd(); return 'comment' }
+                // Block comments
+                if (stream.match('/-')) {
+                    let depth = 1
+                    while (depth > 0 && !stream.eol()) {
+                        if (stream.match('-/')) depth--
+                        else if (stream.match('/-')) depth++
+                        else stream.next()
+                    }
+                    return 'comment'
+                }
+                // Strings
+                if (stream.match('"')) {
+                    while (!stream.eol()) {
+                        if (stream.next() === '"') break
+                    }
+                    return 'string'
+                }
+                // Numbers
+                if (stream.match(/^\d+/)) return 'number'
+                // Keywords
+                if (stream.match(/^(theorem|lemma|def|noncomputable|example|#check|#eval|#print|import|open|namespace|end|section|variable|structure|class|instance|inductive|where|by|have|let|fun|match|with|do|return|if|then|else|for|in|sorry|calc|show|suffices|obtain|exact|apply|intro|intros|rfl|simp|norm_num|ring|linarith|omega|decide|trivial|constructor|cases|induction|rw|rewrite|at|assumption)\b/)) {
+                    return 'keyword'
+                }
+                // Type-like words (capitalized)
+                if (stream.match(/^[A-Z][a-zA-Z0-9_']*/)) return 'typeName'
+                // Identifiers
+                if (stream.match(/^[a-z_][a-zA-Z0-9_']*/)) return 'variableName'
+                // Operators
+                if (stream.match(/^[+\-*/=<>!&|^~@#$%?:∀∃λ→←↔∧∨¬≤≥≠∈∉⊆⊇⊂⊃∪∩]+/)) return 'operator'
+                stream.next()
+                return null
+            },
+            startState() { return {} }
+        })
+
+        // Create editor
+        editorView = new EditorView({
+            state: EditorState.create({
+                doc: '',
+                extensions: [
+                    twoSpaceTabKeymap,
+                    basicSetup,
+                    lean4Language,
+                    lintGutter(),
+                    autocompletion({ override: [lspCompletionSource] }),
+                    yCollab(ytext, provider.awareness),
+                    lspSyncPlugin,
+                    EditorView.theme({
+                        '&': { height: '100%' },
+                        '.cm-scroller': { overflow: 'auto' },
+                    }),
+                ]
+            }),
+            parent: document.getElementById('editor')
+        })
+
+        // =====================================================================
+        // Initialize LSP once Yjs is synced
+        // =====================================================================
+        provider.on('sync', (synced) => {
+            if (synced) {
+                startLspInit()
+            }
+        })
+
+        // Also handle case where sync already happened
+        if (provider.synced) {
+            startLspInit()
+        }
+    </script>
+</body>
+</html>
