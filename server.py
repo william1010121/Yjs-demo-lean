@@ -2,6 +2,8 @@ import asyncio
 import json
 import os
 import logging
+from pathlib import Path
+from urllib.parse import urlparse
 
 from hypercorn import Config
 from hypercorn.asyncio import serve
@@ -24,6 +26,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 LEAN_PROJECT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lean-project")
 LEAN_FILE_PATH = os.path.join(LEAN_PROJECT_DIR, "src", "Scratch.lean")
+LEAN_PROJECT_URI = Path(LEAN_PROJECT_DIR).resolve().as_uri()
+LEAN_FILE_URI = Path(LEAN_FILE_PATH).resolve().as_uri()
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +138,47 @@ def _write_lean_file(content: str):
         logger.error(f"Failed to write {LEAN_FILE_PATH}: {e}")
 
 
+def _is_valid_file_uri(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value)
+    if parsed.scheme != "file":
+        return False
+    return bool(parsed.path)
+
+
+def _validate_lsp_message_uris(msg: dict) -> list[str]:
+    """Validate URI fields in LSP payloads before forwarding to Lean."""
+    errors: list[str] = []
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return errors
+
+    method = msg.get("method")
+
+    if method == "initialize":
+        root_uri = params.get("rootUri")
+        if not _is_valid_file_uri(root_uri):
+            errors.append(f"initialize.params.rootUri={root_uri!r}")
+
+    text_document = params.get("textDocument")
+    uri = text_document.get("uri") if isinstance(text_document, dict) else None
+    methods_requiring_doc_uri = {
+        "textDocument/didOpen",
+        "textDocument/didChange",
+        "textDocument/hover",
+        "textDocument/completion",
+        "$/lean/plainGoal",
+        "$/lean/plainTermGoal",
+    }
+    if method in methods_requiring_doc_uri and not _is_valid_file_uri(uri):
+        errors.append(f"{method}.params.textDocument.uri={uri!r}")
+    elif uri is not None and not _is_valid_file_uri(uri):
+        errors.append(f"{method}.params.textDocument.uri={uri!r}")
+
+    return errors
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -145,12 +190,9 @@ def create_app(ws_server: Server):
         return FileResponse(os.path.join(base_dir, "index.html"))
 
     async def file_uri(request):
-        from pathlib import Path
-        file_uri = Path(LEAN_FILE_PATH).resolve().as_uri()
-        root_uri = Path(LEAN_PROJECT_DIR).resolve().as_uri()
         return JSONResponse({
-            "fileUri": file_uri,
-            "rootUri": root_uri,
+            "fileUri": LEAN_FILE_URI,
+            "rootUri": LEAN_PROJECT_URI,
         })
 
     async def yjs_ws_handler(websocket):
@@ -174,6 +216,16 @@ def create_app(ws_server: Server):
                 while True:
                     data = await websocket.receive_text()
                     msg = json.loads(data)
+                    uri_errors = _validate_lsp_message_uris(msg)
+                    if uri_errors:
+                        logger.error(
+                            "Rejecting invalid LSP payload (session=%s, errors=%s, payload=%s)",
+                            session_id,
+                            "; ".join(uri_errors),
+                            json.dumps(msg, ensure_ascii=False),
+                        )
+                        await websocket.close(code=1011, reason="Invalid LSP URI")
+                        return
                     # Intercept didOpen / didChange to sync content to disk
                     method = msg.get("method", "")
                     if method == "textDocument/didOpen":
@@ -191,6 +243,8 @@ def create_app(ws_server: Server):
                     await proc.stdin.drain()
             except (WebSocketDisconnect, RuntimeError):
                 pass
+            except Exception:
+                logger.exception("Unexpected error forwarding WS -> lake stdin (session=%s)", session_id)
 
         async def stdout_to_ws():
             """Forward lake serve stdout → WebSocket."""
