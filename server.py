@@ -319,6 +319,16 @@ async def main():
     config.bind = [f"{args.host}:{args.port}"]
 
     print(f"Lean project dir: {LEAN_PROJECT_DIR}")
+    print(
+        "Startup /file-uri payload:",
+        json.dumps(
+            {
+                "fileUri": LEAN_FILE_URI,
+                "rootUri": LEAN_PROJECT_URI,
+            },
+            ensure_ascii=False,
+        ),
+    )
     print(f"Server running at: http://{args.host}:{args.port}")
     print(f"Yjs WebSocket:     ws://{args.host}:{args.port}/yjs/{{room}}")
     print(f"LSP WebSocket:     ws://{args.host}:{args.port}/lsp/{{session_id}}")
