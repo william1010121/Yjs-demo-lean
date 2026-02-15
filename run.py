@@ -58,7 +58,8 @@ def write_lakefile(lean_project_dir, with_mathlib):
         mathlib_require=MATHLIB_REQUIRE if with_mathlib else "",
     )
     lakefile = os.path.join(lean_project_dir, "lakefile.lean")
-    with open(lakefile, "w") as f:
+    # Lean source files should always be UTF-8 across platforms.
+    with open(lakefile, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
 
 

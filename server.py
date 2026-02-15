@@ -146,10 +146,11 @@ def create_app(ws_server: Server):
 
     async def file_uri(request):
         from pathlib import Path
-        abs_path = str(Path(LEAN_FILE_PATH).resolve())
+        file_uri = Path(LEAN_FILE_PATH).resolve().as_uri()
+        root_uri = Path(LEAN_PROJECT_DIR).resolve().as_uri()
         return JSONResponse({
-            "fileUri": "file://" + abs_path,
-            "rootUri": "file://" + str(Path(LEAN_PROJECT_DIR).resolve()),
+            "fileUri": file_uri,
+            "rootUri": root_uri,
         })
 
     async def yjs_ws_handler(websocket):
